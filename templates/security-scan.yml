@@ -1,0 +1,29 @@
+parameters:
+  - name: sonarProjectKey
+    type: string
+
+jobs:
+  - job: SecurityScan
+    steps:
+      - task: SonarQubePrepare@6
+        inputs:
+          SonarQube: sc-sonarqube
+          scannerMode: dotnet
+          projectKey: ${{ parameters.sonarProjectKey }}
+      - script: dotnet build -c Release
+        displayName: Build for analysis
+      - task: SonarQubeAnalyze@6
+      - task: SonarQubePublish@6
+        inputs:
+          pollingTimeoutSec: "300"
+      - task: sonar-buildbreaker@8
+        displayName: Enforce quality gate
+        inputs:
+          SonarQube: sc-sonarqube
+      - script: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          if grep -qiE "critical|high" vuln.txt; then
+            echo "##vso[task.logissue type=error]High/critical vulnerable packages found"
+            exit 1
+          fi
+        displayName: Dependency vulnerability gate

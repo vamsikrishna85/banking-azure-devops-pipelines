@@ -1,0 +1,51 @@
+parameters:
+  - name: environment
+    type: string
+
+jobs:
+  - job: Plan
+    steps:
+      - task: TerraformInstaller@1
+        inputs:
+          terraformVersion: 1.9.5
+      - task: AzureCLI@2
+        displayName: terraform plan
+        inputs:
+          azureSubscription: sc-azure-${{ parameters.environment }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          addSpnToEnvironment: true
+          inlineScript: |
+            set -euo pipefail
+            cd infra
+            export ARM_USE_OIDC=true ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId
+            export ARM_OIDC_TOKEN=$idToken ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+            terraform init -backend-config="key=payments-${{ parameters.environment }}.tfstate"
+            terraform plan -var-file=envs/${{ parameters.environment }}.tfvars -out=tfplan -detailed-exitcode || [ $? -eq 2 ]
+      - publish: infra/tfplan
+        artifact: tfplan-${{ parameters.environment }}
+
+  - deployment: Apply
+    dependsOn: Plan
+    environment: infra-${{ parameters.environment }}   # approval to review the plan
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+            - download: current
+              artifact: tfplan-${{ parameters.environment }}
+            - task: AzureCLI@2
+              displayName: terraform apply
+              inputs:
+                azureSubscription: sc-azure-${{ parameters.environment }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                addSpnToEnvironment: true
+                inlineScript: |
+                  set -euo pipefail
+                  cd infra
+                  export ARM_USE_OIDC=true ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId
+                  export ARM_OIDC_TOKEN=$idToken ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                  terraform init -backend-config="key=payments-${{ parameters.environment }}.tfstate"
+                  terraform apply -auto-approve $(Pipeline.Workspace)/tfplan-${{ parameters.environment }}/tfplan

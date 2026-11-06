@@ -1,0 +1,65 @@
+# Payments API – multi-stage pipeline
+name: $(Build.SourceBranchName)-$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include: [main, release/*]
+pr:
+  branches:
+    include: [main]
+
+parameters:
+  - name: environments
+    type: object
+    default:
+      - { name: dev,  after: Quality }
+      - { name: sit,  after: Deploy_dev }
+      - { name: uat,  after: Deploy_sit }
+      - { name: prod, after: Deploy_uat }
+
+variables:
+  - name: serviceName
+    value: payments-api
+  - name: isMain
+    value: ${{ eq(variables['Build.SourceBranch'], 'refs/heads/main') }}
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Build
+    jobs:
+      - template: templates/build.yml
+        parameters:
+          serviceName: $(serviceName)
+
+  - stage: Quality
+    dependsOn: Build
+    jobs:
+      - template: templates/security-scan.yml
+        parameters:
+          sonarProjectKey: payments-api
+
+  - ${{ each env in parameters.environments }}:
+      - stage: Infra_${{ env.name }}
+        displayName: Infra ${{ upper(env.name) }}
+        dependsOn: ${{ env.after }}
+        condition: and(succeeded(), eq(variables.isMain, true))
+        variables:
+          - group: vg-${{ env.name }}
+        jobs:
+          - template: templates/terraform.yml
+            parameters:
+              environment: ${{ env.name }}
+
+      - stage: Deploy_${{ env.name }}
+        displayName: Deploy ${{ upper(env.name) }}
+        dependsOn: Infra_${{ env.name }}
+        variables:
+          - group: vg-${{ env.name }}
+        jobs:
+          - template: templates/deploy-aks.yml
+            parameters:
+              environment: ${{ env.name }}
+              serviceName: $(serviceName)
+              blueGreen: ${{ eq(env.name, 'prod') }}

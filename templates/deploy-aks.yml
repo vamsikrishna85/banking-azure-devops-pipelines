@@ -1,0 +1,56 @@
+parameters:
+  - name: environment
+    type: string
+  - name: serviceName
+    type: string
+  - name: blueGreen
+    type: boolean
+    default: false
+
+jobs:
+  - deployment: Deploy
+    environment: ${{ parameters.environment }}   # uat/prod: approvals, business-hours and change-ticket checks
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+            - task: HelmInstaller@1
+            - task: AzureCLI@2
+              displayName: Helm deploy
+              inputs:
+                azureSubscription: sc-azure-${{ parameters.environment }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  set -euo pipefail
+                  az aks get-credentials -g $(aksResourceGroup) -n $(aksName) --overwrite-existing
+                  RELEASE=${{ parameters.serviceName }}
+                  if [ "${{ parameters.blueGreen }}" = "True" ]; then
+                    LIVE=$(kubectl -n payments get svc $RELEASE -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo blue)
+                    TARGET=$([ "$LIVE" = "blue" ] && echo green || echo blue)
+                    RELEASE=$RELEASE-$TARGET
+                    echo "##vso[task.setvariable variable=targetSlot]$TARGET"
+                  fi
+                  helm upgrade --install $RELEASE deploy/helm \
+                    -n payments --create-namespace \
+                    --set image.tag=$(Build.BuildNumber) \
+                    --set slot=${TARGET:-blue} \
+                    --atomic --wait --timeout 10m
+            - task: AzurePowerShell@5
+              displayName: Smoke test
+              inputs:
+                azureSubscription: sc-azure-${{ parameters.environment }}
+                ScriptPath: scripts/health-check.ps1
+                ScriptArguments: -BaseUrl $(serviceUrl) -Slot $(targetSlot)
+                azurePowerShellVersion: LatestVersion
+            - ${{ if parameters.blueGreen }}:
+                - task: AzureCLI@2
+                  displayName: Swap traffic to new slot
+                  inputs:
+                    azureSubscription: sc-azure-${{ parameters.environment }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      kubectl -n payments patch svc ${{ parameters.serviceName }} \
+                        -p "{\"spec\":{\"selector\":{\"slot\":\"$(targetSlot)\"}}}"
